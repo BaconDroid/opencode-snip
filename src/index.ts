@@ -181,6 +181,31 @@ function skipDoubleQuoted(command: string, start: number): number {
   return command.length
 }
 
+// Backslash quote removal for an UNQUOTED heredoc word. Measured against bash 5.x:
+// `<<\EOF` is delimited by `EOF`, `<<E\OF` by `EOF`, and `<<\\EOF` by `\EOF` — the
+// terminator line never carries the escaping backslash, and no other line does.
+// Storing the word verbatim made every escaped delimiter look unterminated, which
+// made consumeHeredocBodies swallow the rest of the command: the line after the
+// terminator stopped being filtered at all, silently.
+//
+// Quoted words are deliberately NOT passed through this. Measured: `<<'E\OF'` and
+// `<<"E\OF"` are both delimited by `E\OF` verbatim — inside double quotes a
+// backslash before an ordinary character is literal — so the branches above, which
+// return the slice unchanged, are already correct.
+function unescapeHeredocWord(word: string): string {
+  if (!word.includes("\\")) return word
+  let out = ""
+  for (let i = 0; i < word.length; i++) {
+    if (word[i] === "\\" && i + 1 < word.length) {
+      out += word[i + 1]
+      i++
+      continue
+    }
+    out += word[i]
+  }
+  return out
+}
+
 // `<<DELIM`, `<<-DELIM`, `<<'DELIM'`, `<<"DELIM"`. Returns the parsed heredoc and the
 // index just past the delimiter word. `<<<` is a here-string, not a heredoc, and is
 // rejected by the caller before this runs.
@@ -202,7 +227,9 @@ function readHeredoc(command: string, start: number): { heredoc: Heredoc; next: 
   let end = i
   while (end < command.length && !/[\s;|<>&()]/.test(command[end])) end++
   if (end === i) return null
-  return { heredoc: { delimiter: command.slice(i, end), stripTabs }, next: end }
+  const delimiter = unescapeHeredocWord(command.slice(i, end))
+  if (!delimiter) return null
+  return { heredoc: { delimiter, stripTabs }, next: end }
 }
 
 // Heredoc bodies start on the line after the `<<DELIM` redirection and run to a line

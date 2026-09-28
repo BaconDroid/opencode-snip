@@ -181,6 +181,72 @@ describe("patched opencode-snip plugin", () => {
       expect(await run(cmd)).toBe("snip run -- " + cmd)
     })
 
+    // -------------------------------------------------------------------
+    // Backslash-escaped heredoc delimiters. `cat <<\EOF` was stored verbatim, so
+    // the terminator line `EOF` never matched, the heredoc looked unterminated,
+    // and consumeHeredocBodies swallowed the rest of the command: every segment
+    // after the terminator silently stopped being filtered. Measured against bash
+    // 5.x, which is the authority for what the terminator is.
+    // -------------------------------------------------------------------
+    it("unescapes a backslash-escaped heredoc delimiter", async () => {
+      // bash: `<<\EOF` is delimited by `EOF`.
+      const cmd = "cat <<\\EOF\nbody;\nEOF\nls -la"
+      expect(await run(cmd)).toBe("snip run -- cat <<\\EOF\nbody;\nEOF\nsnip run -- ls -la")
+    })
+
+    it("unescapes a backslash anywhere inside an unquoted delimiter", async () => {
+      // bash: `<<E\OF` is delimited by `EOF`.
+      const cmd = "cat <<E\\OF\nbody;\nEOF\nls -la"
+      expect(await run(cmd)).toBe("snip run -- cat <<E\\OF\nbody;\nEOF\nsnip run -- ls -la")
+    })
+
+    it("unescapes an escaped backslash in a delimiter to a single backslash", async () => {
+      // bash: `<<\\EOF` is delimited by `\EOF`, so the terminator line keeps one
+      // backslash and the escaping one is removed.
+      const cmd = "cat <<\\\\EOF\nbody;\n\\EOF\nls -la"
+      expect(await run(cmd)).toBe("snip run -- cat <<\\\\EOF\nbody;\n\\EOF\nsnip run -- ls -la")
+    })
+
+    it("unescapes an escaped delimiter on a dash heredoc", async () => {
+      // bash: `<<-\EOF` is delimited by `EOF`, and the leading tabs are stripped.
+      const cmd = "cat <<-\\EOF\n\tkey = value;\n\tEOF\nls -la"
+      expect(await run(cmd)).toBe("snip run -- cat <<-\\EOF\n\tkey = value;\n\tEOF\nsnip run -- ls -la")
+    })
+
+    it("leaves an unterminated escaped heredoc opaque instead of half-rewriting it", async () => {
+      // Measured against bash: with no line equal to `EOF`, the heredoc runs to
+      // end-of-file, so `body;` AND `ls -la` are both payload. The escaped word must
+      // not be unescaped into a terminator that bash never looks for, and must not be
+      // left in a state where the scanner starts treating body lines as commands.
+      const cmd = "cat <<\\EOF\nbody;\nls -la"
+      expect(await run(cmd)).toBe("snip run -- cat <<\\EOF\nbody;\nls -la")
+    })
+
+    it("keeps both quoted baselines working unchanged", async () => {
+      // Quoted delimiters already worked, and they still terminate on the same line:
+      // the post-terminator `ls -la` is gated exactly as before, so the fix did not
+      // move a single boundary in the quoted cases.
+      const single = "cat <<'EOF'\nbody;\nEOF\nls -la"
+      expect(await run(single)).toBe("snip run -- cat <<'EOF'\nbody;\nEOF\nsnip run -- ls -la")
+      const double = 'cat <<"EOF"\nbody;\nEOF\nls -la'
+      expect(await run(double)).toBe('snip run -- cat <<"EOF"\nbody;\nEOF\nsnip run -- ls -la')
+    })
+
+    it("does NOT unescape inside quotes, where a backslash is literal", async () => {
+      // Measured against bash 5.x: `<<'E\OF'` and `<<"E\OF"` are BOTH delimited by
+      // `E\OF` verbatim - inside double quotes a backslash before an ordinary
+      // character is literal, and single quotes honour no escape at all.
+      //
+      // The wrap on the trailing `ls -la` is the discriminating assertion here: the
+      // heredoc ends on the line `E\OF`, so the next line is gated. Had the word been
+      // unescaped to `EOF`, no line would ever match, the body would swallow the rest
+      // of the command, and `ls -la` would come out unwrapped.
+      const single = "cat <<'E\\OF'\nbody;\nE\\OF\nls -la"
+      expect(await run(single)).toBe("snip run -- cat <<'E\\OF'\nbody;\nE\\OF\nsnip run -- ls -la")
+      const double = 'cat <<"E\\OF"\nbody;\nE\\OF\nls -la'
+      expect(await run(double)).toBe('snip run -- cat <<"E\\OF"\nbody;\nE\\OF\nsnip run -- ls -la')
+    })
+
     it("does not corrupt a here-string", async () => {
       const cmd = "grep 'a; b' <<< \"a; b\""
       expect(await run(cmd)).toBe("snip run -- " + cmd)
