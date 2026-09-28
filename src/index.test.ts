@@ -444,4 +444,215 @@ describe("toolExecuteBefore", () => {
       expect(mockOutput.args.command).toBe("snip echo it\\'s | cat")
     })
   })
+
+  // A `NAME=value` prefix is read as shell words, not as `NAME=[^\s]* +`. The old
+  // pattern could not cross a space, so it stopped inside a quoted or substituted
+  // value and the `snip` was injected into that value.
+  //
+  // These are pre-existing bugs, not a regression: upstream main has the same
+  // `ENV_VAR_RE` and is equally wrong on every case below, so a failure there is
+  // evidence about main, not about this branch.
+  describe("env var prefix values (fixes #22)", () => {
+    it("should not inject inside a double-quoted value", async () => {
+      mockOutput.args.command = 'FOO="a b" ls'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('FOO="a b" snip ls')
+    })
+
+    it("should not inject inside a single-quoted value", async () => {
+      mockOutput.args.command = "MSG='hello world' ls"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("MSG='hello world' snip ls")
+    })
+
+    it("should not inject inside a command substitution value", async () => {
+      mockOutput.args.command = "VAR1=$(echo hello) command"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("VAR1=$(echo hello) snip command")
+    })
+
+    it("should not inject inside a backtick substitution value", async () => {
+      mockOutput.args.command = "V=$(printf `ls`) cmd"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("V=$(printf `ls`) snip cmd")
+    })
+
+    // The value is read by a later command, so a wrong value is observed as output.
+    it("should not inject inside a value consumed by a later command", async () => {
+      mockOutput.args.command = "FOO=\"a b\" bash -c 'echo V=$FOO'"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("FOO=\"a b\" snip bash -c 'echo V=$FOO'")
+    })
+
+    // Measured against bash: `ARR=(a b c)` is a three-element array. The old prefix
+    // stopped at the first space, giving `ARR=(a snip b c)` — four elements. Merely
+    // not splitting at the `(` is not enough either: that yields `snip ARR=(a b c)`,
+    // which bash rejects with a syntax error, so the parens are counted.
+    it("should keep an array assignment at three elements", async () => {
+      mockOutput.args.command = "ARR=(a b c)"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("ARR=(a b c)")
+    })
+
+    it("should keep an array assignment intact before a command", async () => {
+      mockOutput.args.command = "ARR=(a b c) ls -la"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("ARR=(a b c) snip ls -la")
+    })
+
+    // A bare assignment is not a command. `snip FOO=bar` reads as running `snip` with
+    // FOO set and no arguments.
+    it("should leave a bare assignment alone", async () => {
+      mockOutput.args.command = "FOO=bar"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("FOO=bar")
+    })
+
+    it("should still keep a plain multi-assignment prefix", async () => {
+      mockOutput.args.command = "A=1 B=2 ls"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("A=1 B=2 snip ls")
+    })
+  })
+
+  // A heredoc body is literal text the command writes, not a list of commands. No
+  // operator is recognised inside it and no text is rewritten.
+  //
+  // No upstream issue covers this. Unlike the two fixes above, this corrupts a FILE:
+  // `cat <<'EOF' > conf` with `key = a; b` in the body wrote `key = a; snip b` to
+  // disk and still exited 0, so the failure is silent and survives into the next run.
+  describe("heredoc bodies (no upstream issue)", () => {
+    it("should not rewrite a heredoc body", async () => {
+      mockOutput.args.command = "cat <<EOF > conf\nkey = a; b\nEOF"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cat <<EOF > conf\nkey = a; b\nEOF")
+    })
+
+    it("should not rewrite a single-quoted heredoc body", async () => {
+      mockOutput.args.command = "cat <<'EOF' > conf\nline one; line two\nEOF"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cat <<'EOF' > conf\nline one; line two\nEOF")
+    })
+
+    it("should not rewrite a double-quoted heredoc body", async () => {
+      mockOutput.args.command = 'cat <<"EOF" > conf\nline one; line two\nEOF'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip cat <<"EOF" > conf\nline one; line two\nEOF')
+    })
+
+    it("should not rewrite a tab-stripped heredoc body", async () => {
+      mockOutput.args.command = "cat <<-EOF\n\ta; b\nEOF"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cat <<-EOF\n\ta; b\nEOF")
+    })
+
+    it("should not rewrite an unterminated heredoc", async () => {
+      mockOutput.args.command = "cat <<EOF\na; b"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cat <<EOF\na; b")
+    })
+
+    // `<<\EOF` is delimited by `EOF`: measured against bash, the terminator line never
+    // carries the escaping backslash. An escaped delimiter stored verbatim looks
+    // unterminated and swallows the rest of the command.
+    it("should unescape an unquoted heredoc delimiter", async () => {
+      mockOutput.args.command = "cat <<\\EOF\na; b\nEOF"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cat <<\\EOF\na; b\nEOF")
+    })
+
+    // Inside quotes a backslash before an ordinary character is literal, so this one
+    // really is delimited by `E\OF` and must NOT be unescaped.
+    it("should keep a quoted escaped delimiter verbatim", async () => {
+      mockOutput.args.command = "cat <<'E\\OF'\na; b\nE\\OF"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cat <<'E\\OF'\na; b\nE\\OF")
+    })
+
+    // CANNOT witness the fix: unchanged by it, and unchanged on main too. The `;` is
+    // inside a single-quoted string, so no implementation splits on it. Kept as a
+    // control that a body containing a quote is still handled as payload.
+    it("should not rewrite a heredoc body containing a quote", async () => {
+      mockOutput.args.command = "python3 - <<'PY'\nimport os\nprint('a; b')\nPY"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip python3 - <<'PY'\nimport os\nprint('a; b')\nPY")
+    })
+
+    // Control, unchanged by the fix: `<<<` is a here-string, and its quoted content
+    // was already inert.
+    it("should not treat a here-string as a heredoc", async () => {
+      mockOutput.args.command = "cat <<< 'a; b'"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cat <<< 'a; b'")
+    })
+
+    // Control, unchanged by the fix and identical on main: `<<` inside `(( ))` is a
+    // left shift. Armed as a heredoc it would swallow the rest of the command.
+    it("should not treat a shift inside (( )) as a heredoc", async () => {
+      mockOutput.args.command = "((x=1<<4))"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip ((x=1<<4))")
+    })
+  })
+
+  // A `#` at the start of a word begins a comment, which runs to the end of its line
+  // and contains no quotes.
+  //
+  // NOT a regression, and worth being precise about what this buys. main is identical,
+  // because neither implementation treats a newline as an operator. On the SAME line,
+  // the `; rm -rf …` is already part of the comment and the pre-existing scanner did
+  // not split it either — what it did instead was inject `snip` into the comment text.
+  // What the apostrophe case actually costs is the NEXT line: the `'` opens a string
+  // that never closes, so every operator after it is swallowed. Note that the line
+  // itself still is not wrapped, because a newline is not a segment boundary here.
+  describe("comments", () => {
+    it("should not split inside a comment", async () => {
+      mockOutput.args.command = "ls -la # note; still a comment"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip ls -la # note; still a comment")
+    })
+
+    // The old output rewrote the comment text itself: `snip echo a # note; echo b`
+    // became `snip echo a # note; snip echo b`. That `snip` is inert - it is comment
+    // text, and bash runs only `snip echo a` either way - so nothing is lost and no
+    // command goes missing. The fault is that the plugin rewrote text it was told not
+    // to touch, and the emitted command no longer matches what was written.
+    it("should not inject into a comment", async () => {
+      mockOutput.args.command = "echo a # note; echo b"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo a # note; echo b")
+    })
+
+    // The real cost of the phantom string: the `;` on the following line was swallowed
+    // and `echo after` was never filtered.
+    //
+    // It fails before the fix and passes on main, because main's regex never looks at
+    // quotes and so is accidentally right here. It proves the fix; it is not by itself
+    // evidence of a regression, which no test on main can be.
+    it("should not let an apostrophe in a comment swallow the next line", async () => {
+      mockOutput.args.command = "ls # don't delete\nls -la; echo after"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip ls # don't delete\nls -la; snip echo after")
+    })
+
+    it("should not let a comment starting the command swallow the next line", async () => {
+      mockOutput.args.command = "# ls -la; rm f\nls -la; echo after"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip # ls -la; rm f\nls -la; snip echo after")
+    })
+
+    // Controls, unchanged by the fix and identical on main. A `#` mid-word is not a
+    // comment, and a quoted one is text.
+    it("should not treat a mid-word hash as a comment", async () => {
+      mockOutput.args.command = "echo a#b; echo after"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo a#b; snip echo after")
+    })
+
+    it("should not treat a quoted hash as a comment", async () => {
+      mockOutput.args.command = "grep '#' f; echo c"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip grep '#' f; snip echo c")
+    })
+  })
 })
