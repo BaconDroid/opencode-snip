@@ -274,5 +274,69 @@ describe("toolExecuteBefore", () => {
       await toolExecuteBefore(mockInput, mockOutput)
       expect(mockOutput.args.command).toBe("for i in a b; do cat $i; done")
     })
+
+    // Exempting only the keyword-led segment leaves the arms proxied, and `snip b)`
+    // is a bash syntax error.
+    it("should leave a case statement byte-identical", async () => {
+      mockOutput.args.command = "case $f in a) echo one ;; b) echo two ;; esac"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("case $f in a) echo one ;; b) echo two ;; esac")
+    })
+
+    it("should leave a multi-arm case statement byte-identical", async () => {
+      mockOutput.args.command = "case $f in a) ls ;; b) cat f ;; c) echo c ;; esac"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("case $f in a) ls ;; b) cat f ;; c) echo c ;; esac")
+    })
+
+    it("should leave a multiline case statement byte-identical", async () => {
+      mockOutput.args.command = "case $f in\na) echo one ;;\nesac\necho after"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("case $f in\na) echo one ;;\nesac\necho after")
+    })
+
+    it("should leave a for loop with a quoted variable byte-identical", async () => {
+      mockOutput.args.command = 'for f in *.md; do echo "$f"; done'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('for f in *.md; do echo "$f"; done')
+    })
+  })
+
+  describe("escapes and nested substitutions", () => {
+    it("should not treat an escaped quote as the end of a double-quoted string", async () => {
+      mockOutput.args.command = 'echo "it\\"s; fine"; echo after'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip echo "it\\"s; fine"; snip echo after')
+    })
+
+    it("should not inject after an escaped quote", async () => {
+      mockOutput.args.command = 'echo "a\\"b; rm -rf /tmp/x"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip echo "a\\"b; rm -rf /tmp/x"')
+    })
+
+    it("should still recognise an operator after an escaped quote", async () => {
+      mockOutput.args.command = 'echo "a\\"b" && printf ok'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip echo "a\\"b" && snip printf ok')
+    })
+
+    it("should not split inside a substitution nested in double quotes", async () => {
+      mockOutput.args.command = 'echo "$(printf "a;b")"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip echo "$(printf "a;b")"')
+    })
+
+    it("should not split inside a backtick substitution in double quotes", async () => {
+      mockOutput.args.command = 'echo "`printf a;b`"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip echo "`printf a;b`"')
+    })
+
+    it("should not split inside an unquoted substitution", async () => {
+      mockOutput.args.command = 'echo $(printf "a;b")'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip echo $(printf "a;b")')
+    })
   })
 })

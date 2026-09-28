@@ -1,18 +1,68 @@
 import type { Hooks, Plugin } from "@opencode-ai/plugin"
 
 const ENV_VAR_RE = /^([A-Za-z_][A-Za-z0-9_]*=[^\s]* +)*/
-// Shell reserved words that open or close a compound statement; a segment starting with
-// one is not a command at all. Requested in #27.
-const SHELL_KEYWORDS = new Set([
-  "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done",
-  "case", "esac", "in", "function", "select", "time", "coproc",
-  "{", "}", "[[", "]]", "!",
+// Keywords that open a compound statement. When a command contains one, the whole
+// command is left byte-identical: a `for`/`if`/`case` construct is not a list of
+// independently proxyable commands, and prefixing any part of it would make the shell
+// run a bogus command (`snip then echo y`, or `snip b)` inside a case arm). Requested
+// in #27.
+const COMPOUND_COMMAND_KEYWORDS = new Set([
+  "for", "while", "until", "if", "case", "select", "function", "time", "{", "}", "!",
 ])
 
 const UNPROXYABLE_COMMANDS = new Set([
   "cd", "source", ".", "export", "alias", "unset", "set", "shopt", "eval", "exec",
-  ...SHELL_KEYWORDS,
 ])
+
+/**
+ * Index just past the `$(...)` or `` `...` `` starting at `start`, whose body has its
+ * own quoting context. Consuming it whole is what keeps the inner `"` of
+ * `echo "$(printf "a;b")"` from being read as the end of the outer string, which would
+ * expose the inner `;` as an operator. Unterminated input consumes the rest of the
+ * string, which is the safe side.
+ */
+function skipSubstitution(command: string, start: number): number {
+  if (command[start + 1] === "(") {
+    let i = start + 2
+    let depth = 1
+    while (i < command.length) {
+      const char = command[i]
+      if (char === "\\") {
+        i += 2
+        continue
+      }
+      if (char === "'") {
+        let j = i + 1
+        while (j < command.length && command[j] !== "'") j++
+        i = j + 1
+        continue
+      }
+      if (char === '"') {
+        let j = i + 1
+        while (j < command.length && command[j] !== '"') {
+          j += command[j] === "\\" ? 2 : 1
+        }
+        i = j + 1
+        continue
+      }
+      if (char === "(") {
+        depth++
+        i++
+        continue
+      }
+      if (char === ")") {
+        depth--
+        if (depth === 0) return i + 1
+        i++
+        continue
+      }
+      i++
+    }
+    return command.length
+  }
+  const end = command.indexOf("`", start + 1)
+  return end === -1 ? command.length : end + 1
+}
 
 /**
  * Split a command string on shell operators (;, &&, ||, &) while respecting
@@ -32,6 +82,23 @@ function splitOnOperators(command: string): string[] {
   while (i < command.length) {
     const char = command[i]
     const next = command[i + 1]
+
+    // A command substitution has its own quoting context, inside or outside quotes.
+    // Inside single quotes it is literal, so it is deliberately not handled here.
+    if (!inSingleQuote && ((char === "$" && next === "(") || char === "`")) {
+      const end = skipSubstitution(command, i)
+      current += command.slice(i, end)
+      i = end
+      continue
+    }
+    // Inside double quotes a backslash escapes the next character, so the `"` in
+    // `echo "it\"s; fine"` is part of the argument and does not end the string. Without
+    // this the inner `;` is exposed as an operator and `snip` lands in the payload.
+    if (inDoubleQuote && char === "\\") {
+      current += char + (next ?? "")
+      i += 2
+      continue
+    }
 
     // Track quote state
     if (char === "'" && !inDoubleQuote) {
@@ -151,6 +218,18 @@ function snipCommand(command: string): string {
   return `${envPrefix}snip ${bareCmd}`
 }
 
+// True when any command segment opens a compound statement. Exempting only the
+// keyword-led segment is not enough: in `case $f in a) echo one ;; b) echo two ;; esac`
+// only the first segment starts with `case`, and the arm `b) echo two` would become
+// `snip b) echo two`, which is a bash syntax error. So the whole command is left alone.
+function isCompoundCommand(segments: string[]): boolean {
+  return segments.some((segment, index) => {
+    if (index % 2 === 1) return false
+    const first = segment.trim().split(/\s+/)[0]
+    return first !== undefined && COMPOUND_COMMAND_KEYWORDS.has(first)
+  })
+}
+
 export const toolExecuteBefore: NonNullable<Hooks["tool.execute.before"]> = async (input, output) => {
   if (input.tool !== "bash") return
 
@@ -167,6 +246,11 @@ export const toolExecuteBefore: NonNullable<Hooks["tool.execute.before"]> = asyn
   }
 
   const segments = splitOnOperators(command)
+
+  if (isCompoundCommand(segments)) {
+    output.args.command = command
+    return
+  }
 
   if (segments.length === 1) {
     output.args.command = snipCommand(command)
