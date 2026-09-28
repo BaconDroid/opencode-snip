@@ -339,4 +339,109 @@ describe("toolExecuteBefore", () => {
       expect(mockOutput.args.command).toBe('snip echo $(printf "a;b")')
     })
   })
+
+  // Escapes OUTSIDE quotes. Every expectation below was measured against bash 5.x,
+  // which is the authority for what a backslash does:
+  //
+  //   echo it\'s        -> it's            (a literal apostrophe, not a string)
+  //   echo a\;b         -> a;b             (a literal semicolon, not an operator)
+  //   echo a \| cat     -> a | cat         (a literal pipe, not an operator)
+  //   echo \`date\`     -> `date`          (literal backticks, not a substitution)
+  //
+  // Regression on this branch: the splitter read `\'` as opening a single-quoted
+  // string, so every real separator after it was swallowed as string text.
+  describe("escapes outside quotes", () => {
+    // The four tests below witness the regression: each fails on the pre-fix commit
+    // of this branch. They all PASS against unmodified upstream main, because main
+    // splits on a regex and never looks at quotes, so it is accidentally right here.
+    // They therefore prove the fix, not by themselves the regression: the regression
+    // is shown by pre-fix #30 differing from main, not by a failure on main.
+    it("should recognise a semicolon after an escaped apostrophe", async () => {
+      mockOutput.args.command = "echo it\\'s; ls"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo it\\'s; snip ls")
+    })
+
+    it("should recognise && after an escaped apostrophe", async () => {
+      mockOutput.args.command = "echo it\\'s && ls"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo it\\'s && snip ls")
+    })
+
+    it("should recognise || after an escaped apostrophe", async () => {
+      mockOutput.args.command = "echo it\\'s || ls"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo it\\'s || snip ls")
+    })
+
+    it("should recognise a background & after an escaped apostrophe", async () => {
+      mockOutput.args.command = "echo it\\'s & ls"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo it\\'s & snip ls")
+    })
+
+    // PRE-EXISTING, not a regression: main is equally broken, because its regex
+    // splits on the `;` inside `a\;` and injects `snip` into the argument. bash
+    // reads `\;` as a literal semicolon, so `snip echo a\;snip b` made bash print
+    // `a;snip b` - measured, not inferred. These tests therefore CANNOT witness a
+    // regression, and are not claimed to.
+    it("should not treat an escaped semicolon as an operator", async () => {
+      mockOutput.args.command = "echo a\\;b"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo a\\;b")
+    })
+
+    it("should still split on a real semicolon after an escaped one", async () => {
+      mockOutput.args.command = "echo a\\;b; echo second"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo a\\;b; snip echo second")
+    })
+
+    it("should not treat an escaped pipe as a pipeline", async () => {
+      mockOutput.args.command = "echo a \\| cat"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo a \\| cat")
+    })
+
+    // Controls. These pass before and after the fix; they are here to prove the
+    // guard did not over-reach and change behaviour that was already correct.
+    it("should leave an escaped backtick pair as literal text", async () => {
+      mockOutput.args.command = "echo \\`date\\`; ls"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo \\`date\\`; snip ls")
+    })
+
+    it("should not read an escaped $ as a command substitution", async () => {
+      mockOutput.args.command = "echo \\$(date); ls"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo \\$(date); snip ls")
+    })
+
+    // Inside single quotes bash honours no escapes, so the `'` after `\` DOES close
+    // the string and the `;` that follows is a real separator.
+    it("should still close a single-quoted string at a backslash-quote", async () => {
+      mockOutput.args.command = "echo 'a\\'; echo second"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo 'a\\'; snip echo second")
+    })
+
+    // `\\` is one escaped backslash, so the `'` that follows it is a real quote and
+    // opens a string that bash never closes: the rest of the command is payload.
+    // Leaving it un-split is the safe side, and matches bash refusing the input.
+    //
+    // Not a regression either: this passed before the fix as well, because pre-fix
+    // #30 mis-read `\'` as a quote but read `\\` correctly. It is a control, and it
+    // fails against main, which splits here - main is the wrong side on this input.
+    it("should not open a string from a quote preceded by an escaped backslash", async () => {
+      mockOutput.args.command = "echo a\\\\'; ls"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo a\\\\'; ls")
+    })
+
+    it("should still prefix only the head of a pipeline after an escaped apostrophe", async () => {
+      mockOutput.args.command = "echo it\\'s | cat"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo it\\'s | cat")
+    })
+  })
 })
