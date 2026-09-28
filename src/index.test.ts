@@ -196,4 +196,161 @@ describe("toolExecuteBefore", () => {
       expect(mockOutput.args.command).toBe('snip echo "hello | world" | cat')
     })
   })
+
+  // Every assertion below used to fail by rewriting the command's own payload: a `snip`
+  // landed inside a quoted argument, inside a heredoc body, or inside an env value.
+
+  describe("SSH and quoted remote commands", () => {
+    it("should not split semicolons inside double-quoted SSH command", async () => {
+      mockOutput.args.command = 'ssh root@host "echo hello; echo world"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "echo hello; echo world"')
+    })
+
+    it("should not split semicolons inside single-quoted SSH command", async () => {
+      mockOutput.args.command = "ssh root@host 'echo hello; echo world'"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip ssh root@host 'echo hello; echo world'")
+    })
+
+    it("should not split && inside double-quoted SSH command", async () => {
+      mockOutput.args.command = 'ssh root@host "cmd1 && cmd2"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "cmd1 && cmd2"')
+    })
+
+    it("should not split || inside double-quoted SSH command", async () => {
+      mockOutput.args.command = 'ssh root@host "cmd1 || cmd2"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "cmd1 || cmd2"')
+    })
+
+    it("should not split multiple semicolons inside SSH command", async () => {
+      mockOutput.args.command = 'ssh root@host "cmd1; cmd2; cmd3; cmd4"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "cmd1; cmd2; cmd3; cmd4"')
+    })
+
+    it("should still split operators outside quotes in SSH command", async () => {
+      mockOutput.args.command = 'ssh root@host "echo hello; echo world" && echo done'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "echo hello; echo world" && snip echo done')
+    })
+
+    it("should handle SSH with ssh options and quoted remote command", async () => {
+      mockOutput.args.command = 'ssh -o BatchMode=yes root@host "hostname; uname -a"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh -o BatchMode=yes root@host "hostname; uname -a"')
+    })
+
+    it("should handle nested quotes in SSH command", async () => {
+      mockOutput.args.command = 'ssh root@host "echo \'hello world\'; echo done"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "echo \'hello world\'; echo done"')
+    })
+
+    it("should handle docker exec with quoted command", async () => {
+      mockOutput.args.command = 'docker exec container bash -c "cd /app && npm test"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip docker exec container bash -c "cd /app && npm test"')
+    })
+
+    it("should handle bash -c with quoted command", async () => {
+      mockOutput.args.command = 'bash -c "for i in 1 2 3; do echo $i; done"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip bash -c "for i in 1 2 3; do echo $i; done"')
+    })
+  })
+
+  describe("env var prefix values (fixes #22)", () => {
+    it("should not inject inside a command substitution", async () => {
+      mockOutput.args.command = "VAR1=$(echo hello) command"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("VAR1=$(echo hello) snip command")
+    })
+
+    it("should not inject inside a backtick substitution", async () => {
+      mockOutput.args.command = "V=$(printf `ls`) cmd"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("V=$(printf `ls`) snip cmd")
+    })
+
+    it("should not inject inside a quoted value", async () => {
+      mockOutput.args.command = 'FOO="a b" ls'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('FOO="a b" snip ls')
+    })
+  })
+
+  describe("shell keywords (fixes #27)", () => {
+    it("should leave an if statement byte-identical", async () => {
+      mockOutput.args.command = "if [ -f x ]; then echo y; fi"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("if [ -f x ]; then echo y; fi")
+    })
+
+    it("should leave a for loop byte-identical", async () => {
+      mockOutput.args.command = "for i in a b; do cat $i; done"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("for i in a b; do cat $i; done")
+    })
+  })
+
+  describe("heredoc bodies", () => {
+    it("should not rewrite a heredoc body", async () => {
+      mockOutput.args.command = "cat <<EOF > conf\nkey = a; b\nEOF"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cat <<EOF > conf\nkey = a; b\nEOF")
+    })
+
+    it("should not rewrite a quoted heredoc body", async () => {
+      mockOutput.args.command = "cat <<'EOF' > conf\nline one; line two\nEOF"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cat <<'EOF' > conf\nline one; line two\nEOF")
+    })
+
+    it("should not rewrite a tab-stripped heredoc body", async () => {
+      mockOutput.args.command = "cat <<-EOF\n\ta; b\nEOF"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cat <<-EOF\n\ta; b\nEOF")
+    })
+
+    it("should not rewrite an unterminated heredoc", async () => {
+      mockOutput.args.command = "cat <<EOF\na; b"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cat <<EOF\na; b")
+    })
+
+    it("should not treat a here-string as a heredoc", async () => {
+      mockOutput.args.command = "cat <<< 'a; b'"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cat <<< 'a; b'")
+    })
+
+    it("should not treat a shift inside (( )) as a heredoc", async () => {
+      mockOutput.args.command = "((x=1<<4))"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip ((x=1<<4))")
+    })
+  })
+
+  describe("comments and escapes", () => {
+    it("should not split inside a comment", async () => {
+      mockOutput.args.command = "ls -la # note; still a comment"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip ls -la # note; still a comment")
+    })
+
+    it("should not let an apostrophe in a comment swallow the rest", async () => {
+      mockOutput.args.command = "ls # don't delete; keep this"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip ls # don't delete; keep this")
+    })
+
+    it("should not split on an escaped semicolon", async () => {
+      mockOutput.args.command = "find . -exec ls {} \\; ; echo done"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip find . -exec ls {} \\; ; snip echo done")
+    })
+  })
 })
