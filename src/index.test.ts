@@ -196,4 +196,83 @@ describe("toolExecuteBefore", () => {
       expect(mockOutput.args.command).toBe('snip echo "hello | world" | cat')
     })
   })
+
+  // Every assertion below used to fail by rewriting the command's own payload: a `snip`
+  // landed inside a quoted argument, or the plugin tried to exec a shell keyword.
+
+  describe("SSH and quoted remote commands", () => {
+    it("should not split semicolons inside double-quoted SSH command", async () => {
+      mockOutput.args.command = 'ssh root@host "echo hello; echo world"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "echo hello; echo world"')
+    })
+
+    it("should not split semicolons inside single-quoted SSH command", async () => {
+      mockOutput.args.command = "ssh root@host 'echo hello; echo world'"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip ssh root@host 'echo hello; echo world'")
+    })
+
+    it("should not split && inside double-quoted SSH command", async () => {
+      mockOutput.args.command = 'ssh root@host "cmd1 && cmd2"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "cmd1 && cmd2"')
+    })
+
+    it("should not split || inside double-quoted SSH command", async () => {
+      mockOutput.args.command = 'ssh root@host "cmd1 || cmd2"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "cmd1 || cmd2"')
+    })
+
+    it("should not split multiple semicolons inside SSH command", async () => {
+      mockOutput.args.command = 'ssh root@host "cmd1; cmd2; cmd3; cmd4"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "cmd1; cmd2; cmd3; cmd4"')
+    })
+
+    it("should still split operators outside quotes in SSH command", async () => {
+      mockOutput.args.command = 'ssh root@host "echo hello; echo world" && echo done'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "echo hello; echo world" && snip echo done')
+    })
+
+    it("should handle SSH with ssh options and quoted remote command", async () => {
+      mockOutput.args.command = 'ssh -o BatchMode=yes root@host "hostname; uname -a"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh -o BatchMode=yes root@host "hostname; uname -a"')
+    })
+
+    it("should handle nested quotes in SSH command", async () => {
+      mockOutput.args.command = 'ssh root@host "echo \'hello world\'; echo done"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "echo \'hello world\'; echo done"')
+    })
+
+    it("should handle docker exec with quoted command", async () => {
+      mockOutput.args.command = 'docker exec container bash -c "cd /app && npm test"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip docker exec container bash -c "cd /app && npm test"')
+    })
+
+    it("should handle bash -c with quoted command", async () => {
+      mockOutput.args.command = 'bash -c "for i in 1 2 3; do echo $i; done"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip bash -c "for i in 1 2 3; do echo $i; done"')
+    })
+  })
+
+  describe("shell keywords", () => {
+    it("should leave an if statement byte-identical", async () => {
+      mockOutput.args.command = "if [ -f x ]; then echo y; fi"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("if [ -f x ]; then echo y; fi")
+    })
+
+    it("should leave a for loop byte-identical", async () => {
+      mockOutput.args.command = "for i in a b; do cat $i; done"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("for i in a b; do cat $i; done")
+    })
+  })
 })
