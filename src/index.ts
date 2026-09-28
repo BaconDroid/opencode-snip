@@ -1,10 +1,124 @@
 import type { Hooks, Plugin } from "@opencode-ai/plugin"
 
 const ENV_VAR_RE = /^([A-Za-z_][A-Za-z0-9_]*=[^\s]* +)*/
+// Shell reserved words that open or close a compound statement; a segment starting with
+// one is not a command at all. Requested in #27.
+const SHELL_KEYWORDS = new Set([
+  "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done",
+  "case", "esac", "in", "function", "select", "time", "coproc",
+  "{", "}", "[[", "]]", "!",
+])
+
 const UNPROXYABLE_COMMANDS = new Set([
   "cd", "source", ".", "export", "alias", "unset", "set", "shopt", "eval", "exec",
+  ...SHELL_KEYWORDS,
 ])
-const OPERATOR_RE = /(\s*(?:&&|\|\||;)\s*|\s&\s?)/
+
+/**
+ * Split a command string on shell operators (;, &&, ||, &) while respecting
+ * single and double quotes. Operators inside quoted strings (e.g. the
+ * semicolons inside `ssh host "cmd1; cmd2"`) are NOT treated as separators.
+ *
+ * Returns alternating [command, operator, command, operator, ...] segments,
+ * matching the behaviour of String.split() with a capturing group.
+ */
+function splitOnOperators(command: string): string[] {
+  const segments: string[] = []
+  let current = ""
+  let inSingleQuote = false
+  let inDoubleQuote = false
+  let i = 0
+
+  while (i < command.length) {
+    const char = command[i]
+    const next = command[i + 1]
+
+    // Track quote state
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote
+      current += char
+      i++
+      continue
+    }
+    if (char === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote
+      current += char
+      i++
+      continue
+    }
+
+    // Only split on operators outside quotes
+    if (!inSingleQuote && !inDoubleQuote) {
+      // && or ||
+      if ((char === "&" && next === "&") || (char === "|" && next === "|")) {
+        let op = ""
+        while (current && /\s/.test(current[current.length - 1])) {
+          op = current[current.length - 1] + op
+          current = current.slice(0, -1)
+        }
+        op += char + next
+        i += 2
+        while (i < command.length && command[i] === " ") {
+          op += " "
+          i++
+        }
+        segments.push(current)
+        segments.push(op)
+        current = ""
+        continue
+      }
+
+      // ; (semicolon)
+      if (char === ";") {
+        let op = ""
+        while (current && /\s/.test(current[current.length - 1])) {
+          op = current[current.length - 1] + op
+          current = current.slice(0, -1)
+        }
+        op += ";"
+        i++
+        while (i < command.length && command[i] === " ") {
+          op += " "
+          i++
+        }
+        segments.push(current)
+        segments.push(op)
+        current = ""
+        continue
+      }
+
+      // & (background operator, not &&, not part of redirection like 2>&1)
+      if (char === "&" && next !== "&") {
+        // Only split if preceded by whitespace (avoids 2>&1, 1>&2, etc.)
+        if (current && /\s/.test(current[current.length - 1])) {
+          let op = current[current.length - 1]
+          current = current.slice(0, -1)
+          op += "&"
+          i++
+          while (i < command.length && command[i] === " ") {
+            op += " "
+            i++
+          }
+          segments.push(current)
+          segments.push(op)
+          current = ""
+          continue
+        }
+      }
+    }
+
+    current += char
+    i++
+  }
+
+  if (current) segments.push(current)
+  return segments
+}
+
+function isOperatorSegment(segment: string): boolean {
+  const trimmed = segment.trim()
+  return trimmed === "&&" || trimmed === "||" || trimmed === ";" || trimmed === "&"
+}
 
 function findFirstPipe(command: string): number {
   let inSingleQuote = false
@@ -52,7 +166,7 @@ export const toolExecuteBefore: NonNullable<Hooks["tool.execute.before"]> = asyn
     return
   }
 
-  const segments = command.split(OPERATOR_RE)
+  const segments = splitOnOperators(command)
 
   if (segments.length === 1) {
     output.args.command = snipCommand(command)
@@ -60,7 +174,7 @@ export const toolExecuteBefore: NonNullable<Hooks["tool.execute.before"]> = asyn
   }
 
   output.args.command = segments
-    .map((segment) => OPERATOR_RE.test(segment) ? segment : snipCommand(segment))
+    .map((segment) => isOperatorSegment(segment) ? segment : snipCommand(segment))
     .join("")
 }
 
