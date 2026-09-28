@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest"
-import { toolExecuteBefore } from "./index"
+import { toolExecuteBefore, SnipPlugin } from "./index"
 
 describe("toolExecuteBefore", () => {
   let mockInput: { tool: string; sessionID: string; callID: string }
@@ -195,5 +195,40 @@ describe("toolExecuteBefore", () => {
       await toolExecuteBefore(mockInput, mockOutput)
       expect(mockOutput.args.command).toBe('snip echo "hello | world" | cat')
     })
+  })
+})
+
+describe("SnipPlugin availability probe", () => {
+  // `$` is opencode's shell runner, used here as a tagged template. A stand-in records
+  // the command it was handed so the probe's spelling can be asserted, and settles the
+  // way the real one does: by exit status, which surfaces as a rejection.
+  function mockShell(available: boolean) {
+    const calls: string[] = []
+    const $ = (strings: TemplateStringsArray) => {
+      calls.push(strings.join(""))
+      return {
+        quiet: async () => {
+          if (!available) throw new Error("exit status 1")
+        },
+      }
+    }
+    return { $, calls }
+  }
+
+  it("should probe with the POSIX builtin, not which", async () => {
+    const { $, calls } = mockShell(true)
+    const hooks = await SnipPlugin({ $ } as never)
+
+    // `which` is not POSIX and is missing from minimal and BusyBox images. Probing
+    // with it made the plugin disable itself on those hosts, silently.
+    expect(calls).toEqual(["command -v snip"])
+    expect(hooks["tool.execute.before"]).toBe(toolExecuteBefore)
+  })
+
+  it("should disable itself when the probe fails", async () => {
+    const { $ } = mockShell(false)
+    const hooks = await SnipPlugin({ $ } as never)
+
+    expect(hooks).toEqual({})
   })
 })

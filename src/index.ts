@@ -66,7 +66,13 @@ export const toolExecuteBefore: NonNullable<Hooks["tool.execute.before"]> = asyn
 
 export const SnipPlugin: Plugin = async ({ $ }) => {
   try {
-    await $`which snip`.quiet()
+    // `command -v` is a POSIX shell builtin; `which` is not part of POSIX and is
+    // absent from minimal and BusyBox images, where the probe failed even when snip
+    // was installed. The failure is silent by construction - the catch below disables
+    // the plugin with a console.warn, so filtering stops without an error reaching
+    // the agent. Both forms exit non-zero when snip is missing, so the catch still
+    // means what it did.
+    await $`command -v snip`.quiet()
   } catch {
     console.warn("[snip] snip binary not found in PATH — plugin disabled")
     return {}
