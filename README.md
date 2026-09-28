@@ -4,7 +4,12 @@ OpenCode plugin that automatically prefixes shell commands with [snip](https://g
 
 ## This fork
 
-This is a fork of [VincentHardouin/opencode-snip](https://github.com/VincentHardouin/opencode-snip). It is consumed as `github:BaconDroid/opencode-snip`, and it diverges from upstream `main` by exactly one commit, which replaces `src/index.ts` with a quote-, comment- and heredoc-aware rewriter. Everything else in the repository is upstream's, including `.opencode/plugins/index.ts`, which re-exports `../../src/index.ts` and is therefore unchanged.
+This is a fork of [VincentHardouin/opencode-snip](https://github.com/VincentHardouin/opencode-snip). It is consumed as `github:BaconDroid/opencode-snip`, and it diverges from upstream `main` by two commits, with nothing missing from upstream:
+
+1. `455793d` — replaces `src/index.ts` with a quote-, comment- and heredoc-aware rewriter, and ports the regression suite into `src/index.test.ts` so the fork verifies itself.
+2. `81d2790` — makes the inherited release workflow manual-only (`workflow_dispatch` instead of triggering on a successful CI run), so a `fix:` commit on the default branch cannot start publishing to npm.
+
+Everything else in the repository is upstream's, including `.opencode/plugins/index.ts`, which re-exports `../../src/index.ts` and is therefore unchanged.
 
 The upstream plugin splits a command on a regular expression and prefixes each piece, which both corrupted shell payloads and lost filtering opportunities. This fork tokenises the command instead — tracking quotes, comments, heredoc bodies, arithmetic, operators and redirections — and then decides per segment. The concrete problems it fixes: a `>` inside a heredoc body or a comment was mistaken for a redirection; `2>&1` and `&>` were mangled; only the first command of a pipeline was prefixed; and a command whose output was redirected to a **file** was prefixed anyway, so the file ended up holding the *condensed* output instead of the tool's own bytes (measured with snip 0.25.2: `ls -la > out.txt` writes 275 bytes including the `total` line, `snip run -- ls -la > out.txt` writes 80 bytes without it, and the tokens are saved nowhere because the file never reaches the model). A segment whose redirection target is a regular file is now emitted verbatim, while a descriptor duplication (`2>&1`) and a pipe are still compacted. It also skips arithmetic expansion and trailing comments as filterable payload, and keeps a ratchet on the 71-entry unproxyable list so it cannot drift away from what `snip` actually refuses.
 
