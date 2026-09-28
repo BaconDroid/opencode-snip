@@ -83,20 +83,28 @@ function splitOnOperators(command: string): string[] {
     const char = command[i]
     const next = command[i + 1]
 
+    // Outside quotes a backslash escapes the next character, so `\'` is a literal
+    // apostrophe rather than the start of a string, and `\`` is a literal backtick
+    // rather than a command substitution. Without this the scanner enters a
+    // single-quote state on `\'` and then reads every real separator as string text:
+    // in `echo it\'s; ls` the `;` was not recognised and `ls` was never wrapped.
+    // This also subsumes the double-quoted case, where the `"` in `echo "it\"s; fine"`
+    // is part of the argument and must not end the string. Inside single quotes bash
+    // honours no escapes, so the guard deliberately does not apply there.
+    if (!inSingleQuote && char === "\\") {
+      current += char + (next ?? "")
+      i += 2
+      continue
+    }
+
     // A command substitution has its own quoting context, inside or outside quotes.
     // Inside single quotes it is literal, so it is deliberately not handled here.
+    // Reached only for an unescaped `$(` or backtick: the guard above has already
+    // consumed `\$(` and `` \` ``, which bash reads as literal text.
     if (!inSingleQuote && ((char === "$" && next === "(") || char === "`")) {
       const end = skipSubstitution(command, i)
       current += command.slice(i, end)
       i = end
-      continue
-    }
-    // Inside double quotes a backslash escapes the next character, so the `"` in
-    // `echo "it\"s; fine"` is part of the argument and does not end the string. Without
-    // this the inner `;` is exposed as an operator and `snip` lands in the payload.
-    if (inDoubleQuote && char === "\\") {
-      current += char + (next ?? "")
-      i += 2
       continue
     }
 
@@ -193,7 +201,16 @@ function findFirstPipe(command: string): number {
   
   for (let i = 0; i < command.length; i++) {
     const char = command[i]
-    
+
+    // Same rule as the splitter: outside quotes a backslash escapes the next
+    // character, so `\'` does not open a string and `\|` is a literal pipe rather than
+    // an operator. Missed here the phantom string also hides a real pipe, and the
+    // head of the pipeline is then left unwrapped.
+    if (char === "\\" && !inSingleQuote) {
+      i++
+      continue
+    }
+
     if (char === "'" && !inDoubleQuote) {
       inSingleQuote = !inSingleQuote
     } else if (char === '"' && !inSingleQuote) {
