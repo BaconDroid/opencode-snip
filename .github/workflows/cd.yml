@@ -1,21 +1,15 @@
 name: CD
 
-# Publication is manual-only in this fork.
-#
-# Upstream triggers this on a successful CI run on `main`, which means any
-# `fix:`-prefixed commit attempts a patch release. That is not wanted here: this
-# fork is consumed from its default branch, and an accidental npm publish under
-# the maintainer's account is not recoverable by editing a file here.
-#
-# Run it deliberately with: gh workflow run cd.yml --repo BaconDroid/opencode-snip
-# Requires NPM_TOKEN in the repository secrets; without it the release step
-# fails and nothing is published.
 on:
-  workflow_dispatch:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
     permissions:
       contents: write
       id-token: write
