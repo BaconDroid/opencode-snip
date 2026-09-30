@@ -1,15 +1,8 @@
-import { execFileSync } from "node:child_process"
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
-import { SnipPlugin, toolExecuteBefore } from "./index"
+import { SnipPlugin, rewrite, toolExecuteBefore } from "./index"
 
-const hasSnip = (() => {
-  try {
-    execFileSync("snip", ["--version"])
-    return true
-  } catch {
-    return false
-  }
-})()
+// Same probe as the plugin startup: an old snip without `hook` skips these tests.
+const hasSnipHook = (await rewrite("git status")) !== undefined
 
 const SNIP_RUN = /^"[^"]*snip(\.exe)?" run -- /
 
@@ -33,7 +26,7 @@ describe("toolExecuteBefore", () => {
     expect(await run("git status")).toBe("git status")
   })
 
-  describe.skipIf(!hasSnip)("with snip", () => {
+  describe.skipIf(!hasSnipHook)("with snip", () => {
     it("should wrap a command snip has a filter for", async () => {
       const command = await run("git status")
       expect(command).toMatch(SNIP_RUN)
