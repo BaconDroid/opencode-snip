@@ -30,11 +30,11 @@ export const toolExecuteBefore: NonNullable<Hooks["tool.execute.before"]> = asyn
   if (rewritten) output.args.command = rewritten
 }
 
-export const SnipPlugin: Plugin = async ({ $ }) => {
-  try {
-    await $`which snip`.quiet()
-  } catch {
-    console.warn("[snip] snip binary not found in PATH — plugin disabled")
+export const SnipPlugin: Plugin = async () => {
+  // Probes `snip hook` rather than the binary alone: a snip without the hook
+  // subcommand would otherwise leave every command unfiltered silently.
+  if (!(await rewrite("git status"))) {
+    console.warn("[snip] snip hook unavailable (binary missing or too old) — plugin disabled")
     return {}
   }
 
