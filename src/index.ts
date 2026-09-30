@@ -1,40 +1,23 @@
+import { execFile } from "node:child_process"
 import type { Hooks, Plugin } from "@opencode-ai/plugin"
 
-const ENV_VAR_RE = /^([A-Za-z_][A-Za-z0-9_]*=[^\s]* +)*/
-const UNPROXYABLE_COMMANDS = new Set([
-  "cd", "source", ".", "export", "alias", "unset", "set", "shopt", "eval", "exec",
-])
-const OPERATOR_RE = /(\s*(?:&&|\|\||;)\s*|\s&\s?)/
-
-function findFirstPipe(command: string): number {
-  let inSingleQuote = false
-  let inDoubleQuote = false
-  
-  for (let i = 0; i < command.length; i++) {
-    const char = command[i]
-    
-    if (char === "'" && !inDoubleQuote) {
-      inSingleQuote = !inSingleQuote
-    } else if (char === '"' && !inSingleQuote) {
-      inDoubleQuote = !inDoubleQuote
-    } else if (char === '|' && !inSingleQuote && !inDoubleQuote) {
-      if (command[i + 1] === '|' || (i > 0 && command[i - 1] === '|')) {
-        i++
-        continue
+// Delegates to `snip hook` (Claude Code PreToolUse format) so the rewrite rules
+// stay in snip: only filtered commands are wrapped, pipes/redirects/heredocs and
+// command substitutions are left raw. Any failure leaves the command untouched.
+export function rewrite(command: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const child = execFile("snip", ["hook"], { timeout: 2000 }, (error, stdout) => {
+      if (error || !stdout.trim()) return resolve(undefined)
+      try {
+        const rewritten = JSON.parse(stdout).hookSpecificOutput?.updatedInput?.command
+        resolve(typeof rewritten === "string" ? rewritten : undefined)
+      } catch {
+        resolve(undefined)
       }
-      return i
-    }
-  }
-  
-  return -1
-}
-
-function snipCommand(command: string): string {
-  const envPrefix = (command.match(ENV_VAR_RE) ?? [""])[0]
-  const bareCmd = command.slice(envPrefix.length).trim()
-  if (!bareCmd) return command
-  if (UNPROXYABLE_COMMANDS.has(bareCmd.split(/\s+/)[0])) return command
-  return `${envPrefix}snip ${bareCmd}`
+    })
+    child.stdin?.on("error", () => {})
+    child.stdin?.end(JSON.stringify({ tool_name: "Bash", tool_input: { command } }))
+  })
 }
 
 export const toolExecuteBefore: NonNullable<Hooks["tool.execute.before"]> = async (input, output) => {
@@ -42,33 +25,16 @@ export const toolExecuteBefore: NonNullable<Hooks["tool.execute.before"]> = asyn
 
   const command = output.args.command
   if (!command || typeof command !== "string") return
-  if (command.startsWith("snip ")) return
 
-  if (findFirstPipe(command) !== -1) {
-    const pipeIdx = findFirstPipe(command)
-    const firstCmd = command.slice(0, pipeIdx).trimEnd()
-    const rest = command.slice(pipeIdx)
-    output.args.command = snipCommand(firstCmd) + ' ' + rest
-    return
-  }
-
-  const segments = command.split(OPERATOR_RE)
-
-  if (segments.length === 1) {
-    output.args.command = snipCommand(command)
-    return
-  }
-
-  output.args.command = segments
-    .map((segment) => OPERATOR_RE.test(segment) ? segment : snipCommand(segment))
-    .join("")
+  const rewritten = await rewrite(command)
+  if (rewritten) output.args.command = rewritten
 }
 
-export const SnipPlugin: Plugin = async ({ $ }) => {
-  try {
-    await $`which snip`.quiet()
-  } catch {
-    console.warn("[snip] snip binary not found in PATH — plugin disabled")
+export const SnipPlugin: Plugin = async () => {
+  // Probes `snip hook` rather than the binary alone: a snip without the hook
+  // subcommand would otherwise leave every command unfiltered silently.
+  if (!(await rewrite("git status"))) {
+    console.warn("[snip] snip hook unavailable (binary missing or too old) — plugin disabled")
     return {}
   }
 
